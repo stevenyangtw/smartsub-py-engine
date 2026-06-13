@@ -1,0 +1,95 @@
+name: Release smartsub-engine
+
+# 构建并发布到 rolling `latest` Release，供 SmartSub 按需下载。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: smartsub-py-engine-release
+  cancel-in-progress: true
+
+jobs:
+  build_engine:
+    name: Engine ${{ matrix.artifact_suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_suffix: macos-arm64
+            binary: dist/smartsub-engine/smartsub-engine
+          - os: macos-15-intel
+            artifact_suffix: macos-x64
+            binary: dist/smartsub-engine/smartsub-engine
+          - os: windows-2022
+            artifact_suffix: windows-x64
+            binary: dist/smartsub-engine/smartsub-engine.exe
+          - os: ubuntu-22.04
+            artifact_suffix: linux-x64
+            binary: dist/smartsub-engine/smartsub-engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build frozen engine
+        run: pyinstaller --clean --noconfirm smartsub-engine.spec
+
+      - name: Smoke test
+        run: python smoke_test.py ${{ matrix.binary }}
+
+      - name: Archive
+        shell: bash
+        run: tar -czf smartsub-engine-${{ matrix.artifact_suffix }}.tar.gz -C dist smartsub-engine
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: py-engine-${{ matrix.artifact_suffix }}
+          path: smartsub-engine-${{ matrix.artifact_suffix }}.tar.gz
+          if-no-files-found: error
+
+  publish_latest:
+    name: Publish latest Release
+    runs-on: ubuntu-latest
+    needs: build_engine
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum smartsub-engine-*.tar.gz > checksums.sha256
+          cat checksums.sha256
+
+      - name: Delete existing latest release
+        run: gh release delete latest --yes || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest
+          body: |
+            Rolling latest build of smartsub-engine (faster-whisper sidecar).
+            SmartSub downloads from this release tag automatically.
+          files: artifacts/*
+          make_latest: true
