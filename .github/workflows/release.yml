@@ -131,3 +131,35 @@ jobs:
             SmartSub downloads from this release tag automatically.
           files: artifacts/*
           make_latest: true
+
+      - name: Upload meta artifact for GitCode sync
+        uses: actions/upload-artifact@v4
+        with:
+          name: py-engine-meta
+          path: |
+            artifacts/manifest.json
+            artifacts/checksums.sha256
+          if-no-files-found: error
+
+  sync-gitcode-release:
+    name: Sync to GitCode
+    needs: publish_latest
+    if: ${{ always() && needs.publish_latest.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Sync to GitCode Release
+        run: bash scripts/sync-gitcode-release.sh
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          ARTIFACTS_DIR: artifacts
