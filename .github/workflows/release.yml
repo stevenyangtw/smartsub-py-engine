@@ -72,11 +72,49 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Generate checksums
+      - uses: actions/checkout@v4
+        with:
+          path: src
+
+      - name: Generate checksums and manifest
+        shell: bash
         run: |
           cd artifacts
           sha256sum smartsub-engine-*.tar.gz > checksums.sha256
           cat checksums.sha256
+          ENGINE_VERSION=$(python3 -c "import sys; sys.path.insert(0,'../src'); import _version; print(_version.ENGINE_VERSION)")
+          PROTOCOL_VERSION=$(python3 -c "import sys; sys.path.insert(0,'../src'); import _version; print(_version.PROTOCOL_VERSION)")
+          BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          GIT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          python3 - "$ENGINE_VERSION" "$PROTOCOL_VERSION" "$BUILT_AT" "$GIT_SHA" <<'PY'
+          import json, os, sys, hashlib
+          engine_version, protocol_version, built_at, git_sha = sys.argv[1:5]
+          plat = {
+              "smartsub-engine-windows-x64.tar.gz": "windows-x64",
+              "smartsub-engine-macos-arm64.tar.gz": "macos-arm64",
+              "smartsub-engine-macos-x64.tar.gz": "macos-x64",
+              "smartsub-engine-linux-x64.tar.gz": "linux-x64",
+          }
+          artifacts = {}
+          for fname, key in plat.items():
+              if not os.path.exists(fname):
+                  continue
+              data = open(fname, "rb").read()
+              artifacts[key] = {
+                  "sizeBytes": len(data),
+                  "sha256": hashlib.sha256(data).hexdigest(),
+              }
+          manifest = {
+              "engineVersion": engine_version,
+              "protocolVersion": int(protocol_version),
+              "builtAt": built_at,
+              "gitSha": git_sha,
+              "engines": ["faster_whisper"],
+              "artifacts": artifacts,
+          }
+          json.dump(manifest, open("manifest.json", "w"), indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
 
       - name: Delete existing latest release
         run: gh release delete latest --yes || true
