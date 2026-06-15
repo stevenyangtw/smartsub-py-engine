@@ -200,10 +200,18 @@ upload_file() {
     upload_info=$(echo "$upload_response" | sed '$d')
     upload_url=$(echo "$upload_info" | jq -r '.url // empty')
     if [ -z "$upload_url" ]; then
-      asset_already_exists "$http_code" "$upload_info" && {
-        log "  Already exists: ${filename}"
-        return 0
-      }
+      # 关键修复：取 upload_url 时报“已存在”说明预删未生效（同名旧附件仍在）。
+      # 绝不能当成功返回——否则文件没真正上传，GitCode 仍是旧内容（“假成功”）。
+      # 这里重取 id 强制删除后重试；若重试耗尽仍删不掉，落到 FAILED_FILES 真报错。
+      if asset_already_exists "$http_code" "$upload_info"; then
+        log "  Asset still exists (pre-delete missed); re-deleting & retrying: ${filename}"
+        release_id=$(get_release_id)
+        attach_list=$(fetch_attach_files "$release_id")
+        attach_id=$(attach_id_from_list "$attach_list" "$filename")
+        delete_attachment "$release_id" "$attach_id" "$filename" || true
+        sleep $((5 * (retry + 1)))
+        continue
+      fi
       log "  upload_url HTTP ${http_code}: ${upload_info}"
       sleep $((10 * (retry + 1)))
       continue
