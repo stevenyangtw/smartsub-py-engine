@@ -136,11 +136,7 @@ delete_attachment() {
   esac
 }
 
-ensure_release() {
-  if fetch_release_json >/dev/null 2>&1; then
-    log "GitCode release '${GITCODE_TAG}' exists"
-    return 0
-  fi
+create_release() {
   log "Creating GitCode tag and release '${GITCODE_TAG}'..."
   [ "$GITCODE_DRY_RUN" = "1" ] && return 0
   curl -sS -X POST -H "Authorization: Bearer ${GITCODE_TOKEN}" \
@@ -159,6 +155,25 @@ ensure_release() {
     echo "$create_response" | sed '$d' >&2
     exit 1
   fi
+}
+
+# 关键修复：GitCode 对「同名附件」的 PUT 上传不会覆盖旧内容，且该 release 与附件
+# 均不暴露数字 id（实测 release JSON 无 id 字段、attach_files 需要 release id 而拿不到），
+# 因此无法定点删除单个旧附件。实测唯一可靠的刷新办法：删除 tag（GitCode 会级联删除
+# 该 release 及其全部附件）再重建空 release，随后所有文件都按「全新名字」上传即可生效。
+reset_release() {
+  log "Resetting GitCode release '${GITCODE_TAG}' (delete tag -> recreate, the only way to overwrite assets) ..."
+  [ "$GITCODE_DRY_RUN" = "1" ] && return 0
+  curl -sS -o /dev/null -w "  delete tag ${GITCODE_TAG} -> %{http_code}\n" \
+    -X DELETE -H "Authorization: Bearer ${GITCODE_TOKEN}" \
+    "${GITCODE_API_URL}/repos/${GITCODE_OWNER}/${GITCODE_REPO}/tags/${GITCODE_TAG}" || true
+  # 等删除在 GitCode 后端传播，避免重建/上传命中残留索引（GET 不再 200 即视为已删）
+  local i
+  for i in 1 2 3 4 5 6; do
+    sleep 2
+    fetch_release_json >/dev/null 2>&1 || break
+  done
+  create_release
 }
 
 upload_file() {
@@ -256,7 +271,7 @@ main() {
   require_cmd curl
   require_cmd jq
   require_env
-  ensure_release
+  reset_release
   for filename in "${SYNC_FILES[@]}"; do
     upload_file "${ARTIFACTS_DIR}/${filename}" || true
     sleep 1
