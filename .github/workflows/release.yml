@@ -2,6 +2,7 @@ name: Release smartsub-engine
 
 # 构建并发布到 rolling `latest` Release，供 SmartSub 按需下载。
 # 产物为可重定位引擎包(main.py + site-packages/)，由 App 侧 PBS 基座 + PYTHONPATH 加载。
+# 产物名按引擎区分(smartsub-<engineId>-<suffix>.tar.gz)，便于后续多引擎(funasr/qwen)共存同一 release。
 on:
   workflow_dispatch:
   push:
@@ -13,6 +14,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.12.10'
+  ENGINE_ID: 'faster-whisper'
 
 jobs:
   build_engine:
@@ -51,12 +53,12 @@ jobs:
 
       - name: Archive (contents at top level, no wrapper dir)
         shell: bash
-        run: tar -czf smartsub-engine-${{ matrix.artifact_suffix }}.tar.gz -C dist/package .
+        run: tar -czf smartsub-${{ env.ENGINE_ID }}-${{ matrix.artifact_suffix }}.tar.gz -C dist/package .
 
       - uses: actions/upload-artifact@v4
         with:
           name: py-engine-${{ matrix.artifact_suffix }}
-          path: smartsub-engine-${{ matrix.artifact_suffix }}.tar.gz
+          path: smartsub-${{ env.ENGINE_ID }}-${{ matrix.artifact_suffix }}.tar.gz
           if-no-files-found: error
 
   publish_latest:
@@ -79,22 +81,23 @@ jobs:
         shell: bash
         env:
           PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
+          ENGINE_ID: ${{ env.ENGINE_ID }}
         run: |
           cd artifacts
-          sha256sum smartsub-engine-*.tar.gz > checksums.sha256
+          sha256sum smartsub-*.tar.gz > checksums.sha256
           cat checksums.sha256
           ENGINE_VERSION=$(python3 -c "import sys; sys.path.insert(0,'../src'); import _version; print(_version.ENGINE_VERSION)")
           PROTOCOL_VERSION=$(python3 -c "import sys; sys.path.insert(0,'../src'); import _version; print(_version.PROTOCOL_VERSION)")
           BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           GIT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          python3 - "$ENGINE_VERSION" "$PROTOCOL_VERSION" "$BUILT_AT" "$GIT_SHA" "$PYTHON_VERSION" <<'PY'
+          python3 - "$ENGINE_VERSION" "$PROTOCOL_VERSION" "$BUILT_AT" "$GIT_SHA" "$PYTHON_VERSION" "$ENGINE_ID" <<'PY'
           import json, os, sys, hashlib
-          engine_version, protocol_version, built_at, git_sha, python_version = sys.argv[1:6]
+          engine_version, protocol_version, built_at, git_sha, python_version, engine_id = sys.argv[1:7]
           plat = {
-              "smartsub-engine-windows-x64.tar.gz": "windows-x64",
-              "smartsub-engine-macos-arm64.tar.gz": "macos-arm64",
-              "smartsub-engine-macos-x64.tar.gz": "macos-x64",
-              "smartsub-engine-linux-x64.tar.gz": "linux-x64",
+              f"smartsub-{engine_id}-windows-x64.tar.gz": "windows-x64",
+              f"smartsub-{engine_id}-macos-arm64.tar.gz": "macos-arm64",
+              f"smartsub-{engine_id}-macos-x64.tar.gz": "macos-x64",
+              f"smartsub-{engine_id}-linux-x64.tar.gz": "linux-x64",
           }
           artifacts = {}
           for fname, key in plat.items():
@@ -109,6 +112,8 @@ jobs:
               "engineVersion": engine_version,
               "protocolVersion": int(protocol_version),
               "pythonVersion": python_version,
+              "pythonAbi": "cp312",
+              "engineId": engine_id,
               "builtAt": built_at,
               "gitSha": git_sha,
               "engines": ["faster_whisper"],
@@ -129,7 +134,7 @@ jobs:
           tag_name: latest
           name: latest
           body: |
-            Rolling latest build of smartsub-engine (faster-whisper sidecar).
+            Rolling latest build of smartsub-engine relocatable packages.
             Relocatable package (main.py + site-packages/), loaded by SmartSub's
             bundled python-build-standalone base via PYTHONPATH.
             SmartSub downloads from this release tag automatically.
