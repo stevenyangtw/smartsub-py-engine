@@ -22,26 +22,24 @@ checksums.sha256
 
 ## 本地开发
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt pyinstaller
-
-# 开发模式冒烟
-python smoke_test.py
-
-# 冻结构建
-pyinstaller --clean --noconfirm smartsub-engine.spec
-python smoke_test.py dist/smartsub-engine/smartsub-engine
-```
-
-SmartSub 主仓库开发时，可先在本仓库构建，再在 SmartSub 中设置：
+依赖 [`uv`](https://docs.astral.sh/uv/)（锁定 Python，见 `.python-version`）。产物是
+**可重定位引擎包**（`main.py` + `site-packages/`），由 SmartSub 内置的
+python-build-standalone 基座经 `PYTHONPATH` 加载，不再使用 PyInstaller 冻结。
 
 ```bash
-export PYTHON_ENGINE_CMD="/path/to/dist/smartsub-engine/smartsub-engine"
+# 开发模式冒烟（用 uv 环境直接跑 ./main.py）
+uv run --python "$(cat .python-version)" -- python smoke_test.py
+
+# 构建可重定位引擎包到 dist/package/（main.py + site-packages/）
+uv run --python "$(cat .python-version)" -- python build_engine_package.py dist/package
+
+# 包模式冒烟：基座解释器 + PYTHONPATH=site-packages 跑 dist/package/main.py
+PY="$(uv python find "$(cat .python-version)")"
+"$PY" smoke_test.py --package dist/package "$PY"
 ```
 
-或从 Resource Hub 下载安装到 `userData/py-engine/current/`。
+SmartSub 主仓库开发时，把 `dist/package/` 拷到 `userData/py-engine/current/`，
+或从 Resource Hub 下载安装；App 用内置基座加载该包。
 
 ## 协议
 

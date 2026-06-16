@@ -1,6 +1,7 @@
 name: Release smartsub-engine
 
 # 构建并发布到 rolling `latest` Release，供 SmartSub 按需下载。
+# 产物为可重定位引擎包(main.py + site-packages/)，由 App 侧 PBS 基座 + PYTHONPATH 加载。
 on:
   workflow_dispatch:
   push:
@@ -9,6 +10,9 @@ on:
 concurrency:
   group: smartsub-py-engine-release
   cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12.10'
 
 jobs:
   build_engine:
@@ -20,39 +24,34 @@ jobs:
         include:
           - os: macos-latest
             artifact_suffix: macos-arm64
-            binary: dist/smartsub-engine/smartsub-engine
           - os: macos-15-intel
             artifact_suffix: macos-x64
-            binary: dist/smartsub-engine/smartsub-engine
           - os: windows-2022
             artifact_suffix: windows-x64
-            binary: dist/smartsub-engine/smartsub-engine.exe
           - os: ubuntu-22.04
             artifact_suffix: linux-x64
-            binary: dist/smartsub-engine/smartsub-engine
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+      - name: Install pinned Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
 
-      - name: Build frozen engine
-        run: pyinstaller --clean --noconfirm smartsub-engine.spec
+      - name: Build relocatable engine package
+        run: uv run --python ${{ env.PYTHON_VERSION }} -- python build_engine_package.py dist/package
 
-      - name: Smoke test
-        run: python smoke_test.py ${{ matrix.binary }}
-
-      - name: Archive
+      - name: Smoke test (package mode)
         shell: bash
-        run: tar -czf smartsub-engine-${{ matrix.artifact_suffix }}.tar.gz -C dist smartsub-engine
+        run: |
+          PY="$(uv python find ${PYTHON_VERSION})"
+          "$PY" smoke_test.py --package dist/package "$PY"
+
+      - name: Archive (contents at top level, no wrapper dir)
+        shell: bash
+        run: tar -czf smartsub-engine-${{ matrix.artifact_suffix }}.tar.gz -C dist/package .
 
       - uses: actions/upload-artifact@v4
         with:
@@ -78,6 +77,8 @@ jobs:
 
       - name: Generate checksums and manifest
         shell: bash
+        env:
+          PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
         run: |
           cd artifacts
           sha256sum smartsub-engine-*.tar.gz > checksums.sha256
@@ -86,9 +87,9 @@ jobs:
           PROTOCOL_VERSION=$(python3 -c "import sys; sys.path.insert(0,'../src'); import _version; print(_version.PROTOCOL_VERSION)")
           BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           GIT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          python3 - "$ENGINE_VERSION" "$PROTOCOL_VERSION" "$BUILT_AT" "$GIT_SHA" <<'PY'
+          python3 - "$ENGINE_VERSION" "$PROTOCOL_VERSION" "$BUILT_AT" "$GIT_SHA" "$PYTHON_VERSION" <<'PY'
           import json, os, sys, hashlib
-          engine_version, protocol_version, built_at, git_sha = sys.argv[1:5]
+          engine_version, protocol_version, built_at, git_sha, python_version = sys.argv[1:6]
           plat = {
               "smartsub-engine-windows-x64.tar.gz": "windows-x64",
               "smartsub-engine-macos-arm64.tar.gz": "macos-arm64",
@@ -107,6 +108,7 @@ jobs:
           manifest = {
               "engineVersion": engine_version,
               "protocolVersion": int(protocol_version),
+              "pythonVersion": python_version,
               "builtAt": built_at,
               "gitSha": git_sha,
               "engines": ["faster_whisper"],
@@ -128,6 +130,8 @@ jobs:
           name: latest
           body: |
             Rolling latest build of smartsub-engine (faster-whisper sidecar).
+            Relocatable package (main.py + site-packages/), loaded by SmartSub's
+            bundled python-build-standalone base via PYTHONPATH.
             SmartSub downloads from this release tag automatically.
           files: artifacts/*
           make_latest: true
