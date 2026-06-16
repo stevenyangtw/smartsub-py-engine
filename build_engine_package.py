@@ -20,7 +20,9 @@ ROOT = Path(__file__).resolve().parent
 # 每个引擎产物必须存在的顶层 site-packages 包（构建期断言，防止 requirements 写错）
 ENGINE_ASSERT_PKG = {
     "faster-whisper": "faster_whisper",
-    "funasr": "funasr_onnx",
+    # funasr 引擎实际用 sherpa-onnx 跑 SenseVoice（torch-free、体积极小），
+    # 引擎对外标识仍为 funasr（与 App 侧 engineId/sidecar 名一致）。
+    "funasr": "sherpa_onnx",
 }
 
 
