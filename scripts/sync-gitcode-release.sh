@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Sync smartsub-py-engine build artifacts to GitCode Release (tag=latest).
 # 用 attach_files 接口取附件 id 后 DELETE 再上传，确保覆盖同名旧附件。
+#
+# 本地手动运行（CI 已不再自动同步 GitCode）：
+#   1. 准备产物目录（默认 ./artifacts），放入与 GitHub latest release 同名的
+#      smartsub-*-*.tar.gz + manifest.json + checksums.sha256。可直接下载：
+#        mkdir -p artifacts && cd artifacts
+#        gh release download latest --repo buxuku/smartsub-py-engine
+#        cd ..
+#   2. 导出 GitCode 令牌后执行：
+#        GITCODE_TOKEN=xxxx bash scripts/sync-gitcode-release.sh
+#   可选：GITCODE_DRY_RUN=1 预演不实际上传；ARTIFACTS_DIR 自定义产物目录。
 set -euo pipefail
 
 GITCODE_OWNER="${GITCODE_OWNER:-buxuku1}"
