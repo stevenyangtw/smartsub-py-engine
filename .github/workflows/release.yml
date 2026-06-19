@@ -1,8 +1,9 @@
-name: Release smartsub-engine
+name: Release smartsub-faster-whisper-runtime
 
 # 构建并发布到 rolling `latest` Release，供 SmartSub 按需下载。
-# 产物为可重定位引擎包(main.py + site-packages/)，由 App 侧 PBS 基座 + PYTHONPATH 加载。
-# 产物名按引擎区分(smartsub-<engineId>-<suffix>.tar.gz)，便于后续多引擎(funasr/qwen)共存同一 release。
+# 产物为**单个自包含运行时**(内嵌 PBS CPython + site-packages/ + main.py)，
+# 每个 (os,arch) 一份，由 SmartSub 以 PYTHONHOME/PYTHONPATH 启动其内嵌解释器加载。
+# faster-whisper 是唯一 Python 引擎（funasr/qwen/firered 已改用 App 内的 node sherpa addon）。
 on:
   workflow_dispatch:
   push:
@@ -16,13 +17,13 @@ env:
   PYTHON_VERSION: '3.12.10'
 
 jobs:
-  build_engine:
-    name: ${{ matrix.engine_id }} ${{ matrix.target.artifact_suffix }}
+  build_runtime:
+    name: runtime ${{ matrix.target.artifact_suffix }}
     runs-on: ${{ matrix.target.os }}
     strategy:
       fail-fast: false
       matrix:
-        engine_id: [faster-whisper, funasr]
+        # 每个 (os,arch) 在其匹配的原生 runner 上构建（host == target）。
         target:
           - { os: macos-latest, artifact_suffix: macos-arm64 }
           - { os: macos-15-intel, artifact_suffix: macos-x64 }
@@ -38,65 +39,36 @@ jobs:
       - name: Install pinned Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
-      - name: Build relocatable engine package
-        run: uv run --python ${{ env.PYTHON_VERSION }} -- python build_engine_package.py dist/package ${{ matrix.engine_id }}
+      # 单运行时包：PBS 基座 + uv --only-binary 的官方平台 wheel + main.py，合到一个目录。
+      # --only-binary=:all:（在 build_runtime_package.py 内）禁止 sdist 在 runner 源码编译，
+      # 故 runner CPU 的指令集绝不会烘进产物（老 CPU 由 ct2/onnxruntime 运行时 ISA 派发兜底）。
+      - name: Build self-contained runtime
+        run: uv run --python ${{ env.PYTHON_VERSION }} -- python build_runtime_package.py dist/runtime
 
       - name: Smoke test (package mode)
         shell: bash
         run: |
-          PY="$(uv python find ${PYTHON_VERSION})"
-          "$PY" smoke_test.py --package dist/package "$PY"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            PY="dist/runtime/python.exe"
+          else
+            PY="dist/runtime/bin/python3"
+          fi
+          "$PY" smoke_test.py --package dist/runtime "$PY"
 
       - name: Archive (contents at top level, no wrapper dir)
         shell: bash
-        run: tar -czf smartsub-${{ matrix.engine_id }}-${{ matrix.target.artifact_suffix }}.tar.gz -C dist/package .
+        run: tar -czf smartsub-faster-whisper-runtime-${{ matrix.target.artifact_suffix }}.tar.gz -C dist/runtime .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: py-engine-${{ matrix.engine_id }}-${{ matrix.target.artifact_suffix }}
-          path: smartsub-${{ matrix.engine_id }}-${{ matrix.target.artifact_suffix }}.tar.gz
-          if-no-files-found: error
-
-  # Layer 1: 可下载的 Python 基座（与 App 内置基座同源/同布局）。
-  # 每个目标在其原生 runner 上构建（host == target），macOS 上做 ad-hoc 签名。
-  build_base:
-    name: base ${{ matrix.target.artifact_suffix }}
-    runs-on: ${{ matrix.target.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - { os: macos-latest, artifact_suffix: macos-arm64 }
-          - { os: macos-15-intel, artifact_suffix: macos-x64 }
-          - { os: windows-2022, artifact_suffix: windows-x64 }
-          - { os: ubuntu-22.04, artifact_suffix: linux-x64 }
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
-      - name: Install pinned Python
-        run: uv python install ${{ env.PYTHON_VERSION }}
-
-      - name: Build relocatable base (uv PBS + trim + adhoc-sign)
-        run: uv run --python ${{ env.PYTHON_VERSION }} -- python build_base_package.py dist/py-base
-
-      - name: Archive (contents at top level, no wrapper dir)
-        shell: bash
-        run: tar -czf smartsub-base-${{ matrix.target.artifact_suffix }}.tar.gz -C dist/py-base .
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: py-base-${{ matrix.target.artifact_suffix }}
-          path: smartsub-base-${{ matrix.target.artifact_suffix }}.tar.gz
+          name: runtime-${{ matrix.target.artifact_suffix }}
+          path: smartsub-faster-whisper-runtime-${{ matrix.target.artifact_suffix }}.tar.gz
           if-no-files-found: error
 
   publish_latest:
     name: Publish latest Release
     runs-on: ubuntu-latest
-    needs: [build_engine, build_base]
+    needs: [build_runtime]
     permissions:
       contents: write
     steps:
@@ -115,7 +87,7 @@ jobs:
           PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
         run: |
           cd artifacts
-          sha256sum smartsub-*.tar.gz > checksums.sha256
+          sha256sum smartsub-faster-whisper-runtime-*.tar.gz > checksums.sha256
           cat checksums.sha256
           ENGINE_VERSION=$(python3 -c "import sys; sys.path.insert(0,'../src'); import _version; print(_version.ENGINE_VERSION)")
           PROTOCOL_VERSION=$(python3 -c "import sys; sys.path.insert(0,'../src'); import _version; print(_version.PROTOCOL_VERSION)")
@@ -124,14 +96,12 @@ jobs:
           python3 - "$ENGINE_VERSION" "$PROTOCOL_VERSION" "$BUILT_AT" "$GIT_SHA" "$PYTHON_VERSION" <<'PY'
           import json, os, sys, hashlib
           engine_version, protocol_version, built_at, git_sha, python_version = sys.argv[1:6]
-          # engineId -> sidecar engine key（list_engines 名），决定 manifest.engines。
-          engine_sidecar = {"faster-whisper": "faster_whisper", "funasr": "funasr"}
           suffixes = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
 
-          def artifacts_for(engine_id):
+          def runtime_artifacts():
               out = {}
               for suf in suffixes:
-                  fname = f"smartsub-{engine_id}-{suf}.tar.gz"
+                  fname = f"smartsub-faster-whisper-runtime-{suf}.tar.gz"
                   if not os.path.exists(fname):
                       continue
                   data = open(fname, "rb").read()
@@ -140,27 +110,6 @@ jobs:
                       "sha256": hashlib.sha256(data).hexdigest(),
                   }
               return out
-
-          def base_artifacts():
-              out = {}
-              for suf in suffixes:
-                  fname = f"smartsub-base-{suf}.tar.gz"
-                  if not os.path.exists(fname):
-                      continue
-                  data = open(fname, "rb").read()
-                  out[suf] = {
-                      "sizeBytes": len(data),
-                      "sha256": hashlib.sha256(data).hexdigest(),
-                  }
-              return out
-
-          per_engine = {}
-          engines_present = []
-          for eid, sidecar in engine_sidecar.items():
-              arts = artifacts_for(eid)
-              if arts:
-                  per_engine[eid] = arts
-                  engines_present.append(sidecar)
 
           manifest = {
               "engineVersion": engine_version,
@@ -169,25 +118,12 @@ jobs:
               "pythonAbi": "cp312",
               "builtAt": built_at,
               "gitSha": git_sha,
-              "engines": engines_present,
-              # 兼容旧字段：顶层 artifacts/engineId 仍给 faster-whisper（保持 P0 读取路径不破）。
+              "engines": ["faster_whisper"],
               "engineId": "faster-whisper",
-              "artifacts": per_engine.get("faster-whisper", {}),
-              # 新增：按引擎分桶，供 App 多引擎下载读取。
-              "enginePackages": {
-                  eid: {
-                      "engineId": eid,
-                      "sidecar": engine_sidecar[eid],
-                      "artifacts": arts,
-                  }
-                  for eid, arts in per_engine.items()
-              },
-              # Layer 1：可下载基座包（按平台 artifacts），App 侧下载到
-              # userData/py-base/current 覆盖内置基座。
-              "basePackage": {
-                  "pythonVersion": python_version,
-                  "pythonAbi": "cp312",
-                  "artifacts": base_artifacts(),
+              # 单自包含运行时（内嵌解释器 + site-packages + main.py），按 (os,arch) 分平台。
+              "runtime": {
+                  "artifactPattern": "smartsub-faster-whisper-runtime-<suffix>.tar.gz",
+                  "artifacts": runtime_artifacts(),
               },
           }
           json.dump(manifest, open("manifest.json", "w"), indent=2)
@@ -205,9 +141,9 @@ jobs:
           tag_name: latest
           name: latest
           body: |
-            Rolling latest build of smartsub-engine relocatable packages.
-            Relocatable package (main.py + site-packages/), loaded by SmartSub's
-            bundled python-build-standalone base via PYTHONPATH.
-            SmartSub downloads from this release tag automatically.
+            Rolling latest build of the SmartSub faster-whisper runtime.
+            Single self-contained runtime (embedded python-build-standalone CPython
+            + site-packages/ + main.py); one per (os,arch). SmartSub downloads the
+            matching artifact from this tag and spawns its embedded interpreter.
           files: artifacts/*
           make_latest: true

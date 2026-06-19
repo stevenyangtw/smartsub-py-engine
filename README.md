@@ -1,56 +1,69 @@
 # smartsub-py-engine
 
-SmartSub 的 Python 推理 sidecar（多引擎：faster-whisper / funasr），独立仓库构建与发布。
+SmartSub 的 Python 推理 sidecar（**faster-whisper**），独立仓库构建与发布。
 
 主应用 [buxuku/SmartSub](https://github.com/buxuku/SmartSub) 通过 `latest` Release 按需下载，不内置源码。
 
-引擎与底层库：
+faster-whisper 是 SmartSub 唯一的 Python 引擎；funasr / qwen / firered 已改用 App 内的
+**node sherpa-onnx addon**（原生库随应用内置），不再走本 Python sidecar。
 
-| engineId | 底层库 | 说明 |
-| --- | --- | --- |
-| `faster-whisper` | `faster-whisper`（ctranslate2） | 通用多语种 Whisper |
-| `funasr` | `sherpa-onnx` + `numpy` | SenseVoice-Small（ONNX，torch-free），中文/粤语/日/韩高准确度，自带 silero VAD |
+## 产物形态：单个自包含运行时
+
+每个 `(os, arch)` 发布**一个**自包含运行时 `smartsub-faster-whisper-runtime-<suffix>.tar.gz`，
+内含「内嵌 python-build-standalone(PBS) CPython + `site-packages/` + `main.py`」：
+
+```
+runtime/
+  bin/python3 (unix) | python.exe (win)   # PBS 解释器（可重定位）
+  lib/...                                   # PBS 标准库
+  site-packages/<deps>                      # uv 解析的官方平台 wheel
+  main.py, _version.py, engines/            # sidecar 源码
+```
+
+SmartSub 下载匹配本机 `(os,arch)` 的产物后，以 `PYTHONHOME=<runtime>`、
+`PYTHONPATH=<runtime>/site-packages` 启动 `<runtime>` 内嵌解释器跑 `main.py`。
+**不再有可单独下载的 Python 基座**（基座已并入运行时），也**不使用 PyInstaller**——
+faster-whisper 拖出的原生 wheel（ctranslate2 / av / tokenizers / onnxruntime）由
+`uv` 安装正确的逐平台 wheel（原生依赖经上游 delocate/auditwheel/delvewheel 预捆绑），
+跨平台远比 PyInstaller hook 收集稳健。
 
 ## Release
 
-每次推送到 `main` 或手动触发 workflow 后，CI 以 `engine_id × 平台` 矩阵（2 引擎 × 4 平台 = 8 个包）发布到：
+每次推送到 `main` 或手动触发 workflow 后，CI 以 `(os,arch)` 矩阵（4 平台）在各自原生 runner
+（host == target）构建并发布到：
 
 **https://github.com/buxuku/smartsub-py-engine/releases/tag/latest**
 
-资产（产物名 `smartsub-<engineId>-<suffix>.tar.gz`）：
+资产：
 
 ```
-smartsub-faster-whisper-{macos-arm64,macos-x64,windows-x64,linux-x64}.tar.gz
-smartsub-funasr-{macos-arm64,macos-x64,windows-x64,linux-x64}.tar.gz
+smartsub-faster-whisper-runtime-{macos-arm64,macos-x64,windows-x64,linux-x64}.tar.gz
 checksums.sha256
-manifest.json   # engines[] + 顶层 artifacts(=faster-whisper, 兼容) + enginePackages{<engineId>:{sidecar,artifacts}}
+manifest.json   # engineVersion / protocolVersion / pythonVersion + runtime.artifacts(per-suffix sha256/size)
 ```
 
 ## 本地开发
 
-依赖 [`uv`](https://docs.astral.sh/uv/)（锁定 Python，见 `.python-version`）。产物是
-**可重定位引擎包**（`main.py` + `site-packages/`），由 SmartSub 内置的
-python-build-standalone 基座经 `PYTHONPATH` 加载，不再使用 PyInstaller 冻结。
+依赖 [`uv`](https://docs.astral.sh/uv/)（锁定 Python，见 `.python-version`）。
 
 ```bash
 # 开发模式冒烟（用 uv 环境直接跑 ./main.py）
 uv run --python "$(cat .python-version)" -- python smoke_test.py
 
-# 构建可重定位引擎包到 dist/<engineId>/（main.py + engines/ + site-packages/）
-# 第二个参数是 engineId：faster-whisper | funasr，读取 requirements-<engineId>.txt
-uv run --python "$(cat .python-version)" -- python build_engine_package.py dist/faster-whisper faster-whisper
-uv run --python "$(cat .python-version)" -- python build_engine_package.py dist/funasr funasr
+# 构建单自包含运行时到 dist/runtime/（PBS 解释器 + site-packages + main.py）
+uv run --python "$(cat .python-version)" -- python build_runtime_package.py dist/runtime
 
-# 包模式冒烟：基座解释器 + PYTHONPATH=site-packages 跑 dist/<engineId>/main.py
-PY="$(uv python find "$(cat .python-version)")"
-"$PY" smoke_test.py --package dist/funasr "$PY"
-
-# funasr 真实模型转写冒烟（可选，需先下载 SenseVoice int8 + silero_vad.onnx）：
-# SMARTSUB_FUNASR_ASR_MODEL / _TOKENS / _VAD_MODEL / _WAV 配齐后，上面的 --package 会顺带跑一次转写。
+# 包模式冒烟：用运行时内嵌解释器 + PYTHONPATH=site-packages 跑 dist/runtime/main.py
+#   unix:  dist/runtime/bin/python3 smoke_test.py --package dist/runtime dist/runtime/bin/python3
+#   win:   dist/runtime/python.exe  smoke_test.py --package dist/runtime dist/runtime/python.exe
 ```
 
-SmartSub 主仓库开发时，把 `dist/<engineId>/` 拷到 `userData/py-engines/<engineId>/`，
-或从 Resource Hub 下载安装；App 用内置基座加载该包。
+SmartSub 主仓库开发时，把 `dist/runtime/` 拷到 `userData/py-engines/faster-whisper/`，
+或从「引擎与模型」页下载安装；App 直接用该运行时内嵌解释器加载。
+
+构建加固（跨平台确定性）：`build_runtime_package.py` 内 `uv pip install --only-binary=:all:`
+禁止任何 sdist 在 runner 源码编译（故 runner CPU 的 `-march` 绝不会烘进产物）；PBS 为预构建
+baseline；重原生库（ct2/onnxruntime/numpy/av）运行时按 ISA 派发，老 CPU 自动走 baseline。
 
 ## 协议
 
