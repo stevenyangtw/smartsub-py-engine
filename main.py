@@ -56,12 +56,33 @@ def _make_protocol_stream():
 
 # 必须在任何原生库加载（首个 transcribe/preload 的 worker 线程内）之前完成。
 _protocol_out = _make_protocol_stream()
+log.info("protocol stream isolated (fd1 duplicated for protocol, fd1->stderr for logs)")
 
 _stdout_lock = threading.Lock()
 # 进行中请求的取消标记: request_id -> threading.Event
 _cancel_events = {}
 _cancel_lock = threading.Lock()
 _shutdown = threading.Event()
+# 已在主线程预热过原生 import 的引擎集合（首个 preload/transcribe 时执行，仅一次）。
+_warmed_engines = set()
+
+
+def _warmup_engine_on_main_thread(engine_name):
+    """首个 preload/transcribe 前在主线程预导入引擎的重原生依赖（仅 import，不构造模型）。
+
+    规避 Windows 上 worker 线程首次原生 import 的 loader-lock 死锁；模型构造仍在
+    worker 线程完成（构造不再加载新 DLL，不触发 loader lock）。仅首次执行。
+    """
+    if engine_name in _warmed_engines:
+        return
+    try:
+        engine = get_engine(engine_name)
+        warm = getattr(engine, "warmup_imports", None)
+        if warm:
+            warm()
+        _warmed_engines.add(engine_name)
+    except Exception as exc:  # noqa: BLE001 - 预热失败不致命，worker 会复现并把错误回传客户端
+        log.warning("main-thread warmup error (non-fatal): %r", exc)
 
 
 def emit(message):
@@ -100,6 +121,9 @@ def handle_ping(req_id, params):
 
 def handle_preload(req_id, params):
     """在 worker 线程中预加载模型（仅 _get_model，不转写）。"""
+    # 首个 preload 前在主线程预热原生 import（SmartSub 批处理预热经由 preload 触发），
+    # 规避 Windows worker 线程首次原生 import 的 loader-lock 死锁。
+    _warmup_engine_on_main_thread(params.get("engine", "faster_whisper"))
 
     def worker():
         engine_name = params.get("engine", "faster_whisper")
@@ -120,6 +144,10 @@ def handle_transcribe(req_id, params):
     cancel_event = threading.Event()
     with _cancel_lock:
         _cancel_events[req_id] = cancel_event
+
+    # 首个 transcribe 前在主线程预热原生 import，规避 Windows worker 线程首次原生
+    # import 的 loader-lock 死锁（模型构造仍在下面的 worker 线程完成）。
+    _warmup_engine_on_main_thread(params.get("engine", "faster_whisper"))
 
     def worker():
         engine_name = params.get("engine", "faster_whisper")
@@ -165,6 +193,7 @@ def dispatch(message):
     method = message.get("method")
     params = message.get("params") or {}
     req_id = message.get("id")
+    log.info("dispatch method=%s id=%s", method, req_id)
 
     if method == "shutdown":
         _shutdown.set()

@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 
 from engines import EngineError
 
@@ -21,6 +22,35 @@ _ADVANCED_KEYS = (
     "hallucination_silence_threshold",
     "temperature",
 )
+
+
+# 首次导入这些重原生扩展（含各自的 OpenMP/线程池初始化）必须在主线程完成：
+# Windows 上若首次 import 发生在 worker 线程，DllMain 内建线程会与进程级 loader
+# lock 互相等死。faster-whisper 会惰性 import onnxruntime(VAD)/av 等，故这里显式
+# 列出，确保它们都在主线程预热；worker 线程随后只命中 sys.modules 缓存。
+_WARMUP_MODULES = ("numpy", "ctranslate2", "tokenizers", "av", "onnxruntime", "faster_whisper")
+
+
+def warmup_imports():
+    """在主线程预导入重原生依赖（仅加载 DLL，不构造模型）。
+
+    规避 Windows 上 worker 线程首次原生 import 触发的 loader-lock 死锁。
+    """
+    t_all = time.time()
+    timings = []
+    for mod in _WARMUP_MODULES:
+        t0 = time.time()
+        try:
+            __import__(mod)
+            timings.append("%s=%dms" % (mod, int((time.time() - t0) * 1000)))
+        except Exception as exc:  # noqa: BLE001
+            timings.append("%s=ERR" % mod)
+            log.warning("warmup import %s failed: %r", mod, exc)
+    log.info(
+        "warmup: preloaded native modules on main thread (%s) total=%dms",
+        " ".join(timings),
+        int((time.time() - t_all) * 1000),
+    )
 
 
 def _load_faster_whisper():
@@ -43,8 +73,12 @@ def _get_model(model, device, compute_type, download_root=None):
             kwargs = {"device": device, "compute_type": compute_type}
             if download_root:
                 kwargs["download_root"] = download_root
-            log.info("loading model %s device=%s compute_type=%s", model, device, compute_type)
+            t0 = time.time()
             _model_cache[key] = WhisperModel(model, **kwargs)
+            log.info(
+                "model constructed: model=%s device=%s compute_type=%s (%dms)",
+                model, device, compute_type, int((time.time() - t0) * 1000),
+            )
         return _model_cache[key]
 
 
@@ -100,6 +134,7 @@ def transcribe(params, emit_event, is_cancelled):
         **extra,
     )
 
+    log.info("transcribe started: language=%s duration=%s", info.language, info.duration)
     total = float(info.duration or 0) or None
     segments = []
     for seg in segments_iter:
