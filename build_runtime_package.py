@@ -19,8 +19,15 @@ onnxruntime）；uv 安装正确的逐平台 wheel，其原生依赖由上游 de
 不编译任何 sdist（故 runner CPU 的 -march 绝不会烘进产物）。
 
 用法（需 PATH 上有 uv，在目标平台的原生 runner 上运行，host == target）：
-  uv run --python 3.12.10 -- python build_runtime_package.py <OUT_DIR>
+  uv run --python 3.12.10 -- python build_runtime_package.py <OUT_DIR>            # CPU（默认）
+  uv run --python 3.12.10 -- python build_runtime_package.py <OUT_DIR> --variant cuda  # GPU(CUDA12 Full)
+
+变体（--variant）：
+  cpu （默认）：仅 faster-whisper，产物即原有 CPU 运行时（包名不变）。
+  cuda        ：额外捆绑 NVIDIA cuBLAS/cuDNN(cu12)+CUDA runtime，体积 ~1.4GB，N 卡开箱即用。
+                仅 windows-x64 / linux-x64 有官方 nvidia wheel；macOS 无 GPU，请勿用本变体。
 """
+import argparse
 import shutil
 import subprocess
 import sys
@@ -108,9 +115,17 @@ def adhoc_sign(out: Path) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        sys.exit("usage: build_runtime_package.py <OUT_DIR>")
-    out = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Build self-contained faster-whisper runtime")
+    parser.add_argument("out_dir", help="output runtime directory")
+    parser.add_argument(
+        "--variant",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="cpu (default) or cuda (Full GPU: bundles NVIDIA cuBLAS/cuDNN)",
+    )
+    args = parser.parse_args()
+    out = Path(args.out_dir)
+    variant = args.variant
 
     # 1) PBS 基座拷入 OUT（copy + trim + drop config-*）
     base = uv_base_dir()
@@ -131,9 +146,14 @@ def main() -> None:
     #    确保 wheel tag 与该 PBS ABI 完全一致；禁止 sdist 在 runner 源码编译）。
     site = out / "site-packages"
     site.mkdir(parents=True, exist_ok=True)
-    req = ROOT / f"requirements-{ENGINE_ID}.txt"
+    req = ROOT / (
+        f"requirements-{ENGINE_ID}-cuda.txt"
+        if variant == "cuda"
+        else f"requirements-{ENGINE_ID}.txt"
+    )
     if not req.is_file():
         sys.exit(f"missing {req}")
+    print(f"variant={variant} requirements={req.name}")
     run(
         "uv", "pip", "install",
         "--only-binary=:all:",
@@ -157,9 +177,13 @@ def main() -> None:
     # 6) 断言 + 包模式 smoke（OUT 解释器 + PYTHONPATH=OUT/site-packages 跑 OUT/main.py）
     assert (out / "main.py").is_file(), "main.py missing in runtime"
     assert (site / ASSERT_PKG).is_dir(), f"{ASSERT_PKG} missing in site-packages"
+    if variant == "cuda":
+        assert (site / "nvidia").is_dir(), (
+            "cuda variant: bundled NVIDIA CUDA libs (site-packages/nvidia) missing"
+        )
     py = out_python(out)
     run(str(py), str(ROOT / "smoke_test.py"), "--package", str(out), str(py))
-    print(f"runtime [{ENGINE_ID}] assembled at {out} ({sys.platform})")
+    print(f"runtime [{ENGINE_ID}] variant={variant} assembled at {out} ({sys.platform})")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,7 @@
+# faster-whisper GPU(CUDA 12) 变体依赖：在 CPU 依赖基础上捆绑 ctranslate2 4.5+ GPU 执行
+# 所需的 NVIDIA 运行库（cuBLAS for CUDA 12 + cuDNN 9 for CUDA 12 + CUDA runtime）。
+# 这些 wheel 体积很大（合计 ~1.2GB+），仅 Full GPU 包使用；CPU 包见 requirements-faster-whisper.txt。
+faster-whisper>=1.1.0
+nvidia-cublas-cu12>=12.3
+nvidia-cudnn-cu12>=9.1,<10
+nvidia-cuda-runtime-cu12>=12.3

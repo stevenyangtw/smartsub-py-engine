@@ -35,6 +35,83 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+# 进程级持有 os.add_dll_directory 返回的 cookie，避免被 GC 回收导致目录从 DLL 搜索路径移除（Windows）。
+_dll_dir_cookies = []
+
+
+def _nvidia_lib_dirs():
+    """收集可提供 cuBLAS/cuDNN 的目录：优先包内捆绑的 nvidia/*（Full GPU 包），
+    其次系统 CUDA 安装（Toolkit / 常见路径）。返回去重保序的存在目录列表。
+
+    仅 cuda 变体含 site-packages/nvidia；CPU 包此处通常为空，函数整体即 no-op。"""
+    sub = "bin" if sys.platform == "win32" else "lib"
+    dirs = []
+    here = os.path.dirname(os.path.abspath(__file__))
+    bundled = os.path.join(here, "site-packages", "nvidia")
+    if os.path.isdir(bundled):
+        for name in sorted(os.listdir(bundled)):
+            d = os.path.join(bundled, name, sub)
+            if os.path.isdir(d):
+                dirs.append(d)
+    if sys.platform == "win32":
+        for var, val in os.environ.items():
+            if (var == "CUDA_PATH" or var.startswith("CUDA_PATH_V12")) and val:
+                d = os.path.join(val, "bin")
+                if os.path.isdir(d):
+                    dirs.append(d)
+    elif sys.platform == "linux":
+        for base in ("/usr/local/cuda", "/usr/local/cuda-12"):
+            d = os.path.join(base, "lib64")
+            if os.path.isdir(d):
+                dirs.append(d)
+    seen, uniq = set(), []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            uniq.append(d)
+    return uniq
+
+
+def _setup_cuda_library_path():
+    """让 ctranslate2 在首个原生 import/转写前能定位 CUDA 运行库（cuBLAS/cuDNN）。
+
+    - Windows：把目录加入 DLL 搜索路径（add_dll_directory + PATH），进程内即时生效。
+    - Linux：把目录并入 LD_LIBRARY_PATH 后 re-exec 一次（动态链接器仅在 exec 时读取该
+      变量；进程内修改对已运行进程无效）。re-exec 保留同 pid 与 stdio fd，不影响协议。
+    全程非致命：CPU 包/无 GPU 库时为 no-op，转写按 CPU 进行。"""
+    try:
+        dirs = _nvidia_lib_dirs()
+    except OSError:
+        dirs = []
+    if not dirs:
+        return
+    if sys.platform == "win32":
+        for d in dirs:
+            try:
+                _dll_dir_cookies.append(os.add_dll_directory(d))
+            except OSError as exc:  # noqa: BLE001 - 单目录失败不致命
+                log.warning("cuda: add_dll_directory failed for %s: %r", d, exc)
+        os.environ["PATH"] = os.pathsep.join(dirs + [os.environ.get("PATH", "")])
+        log.info("cuda: registered %d GPU DLL dir(s)", len(dirs))
+    elif sys.platform == "linux":
+        current = os.environ.get("LD_LIBRARY_PATH", "")
+        parts = current.split(os.pathsep) if current else []
+        if all(d in parts for d in dirs):
+            return
+        if os.environ.get("_SMARTSUB_CUDA_REEXEC") == "1":
+            # 已重入一次仍未覆盖：放弃 re-exec，避免死循环（GPU 可能因此不可用，回落 CPU）。
+            log.warning("cuda: re-exec guard hit; proceeding without LD_LIBRARY_PATH update")
+            return
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(dirs + parts)
+        os.environ["_SMARTSUB_CUDA_REEXEC"] = "1"
+        log.info("cuda: re-exec with LD_LIBRARY_PATH for %d GPU lib dir(s)", len(dirs))
+        os.execve(sys.executable, [sys.executable] + sys.argv, os.environ)
+
+
+# 必须在任何原生库加载（首个 transcribe/preload）之前完成；Linux 上可能触发一次 re-exec。
+_setup_cuda_library_path()
+
+
 def _make_protocol_stream():
     """保护协议 stdout 不被原生库污染。
 

@@ -27,8 +27,9 @@ jobs:
         target:
           - { os: macos-latest, artifact_suffix: macos-arm64 }
           - { os: macos-15-intel, artifact_suffix: macos-x64 }
-          - { os: windows-2022, artifact_suffix: windows-x64 }
-          - { os: ubuntu-22.04, artifact_suffix: linux-x64 }
+          # gpu: true 的平台额外构建 Full GPU(CUDA12) 变体（捆绑 cuBLAS/cuDNN，~1.4GB）。
+          - { os: windows-2022, artifact_suffix: windows-x64, gpu: true }
+          - { os: ubuntu-22.04, artifact_suffix: linux-x64, gpu: true }
 
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +66,34 @@ jobs:
           path: smartsub-faster-whisper-runtime-${{ matrix.target.artifact_suffix }}.tar.gz
           if-no-files-found: error
 
+      # ---- Full GPU(CUDA12) 变体（仅 windows-x64 / linux-x64）：包名加 -cuda 后缀，不覆盖 CPU 包 ----
+      - name: Build self-contained runtime (CUDA)
+        if: matrix.target.gpu
+        run: uv run --python ${{ env.PYTHON_VERSION }} -- python build_runtime_package.py dist/runtime-cuda --variant cuda
+
+      - name: Smoke test CUDA (package mode)
+        if: matrix.target.gpu
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            PY="dist/runtime-cuda/python.exe"
+          else
+            PY="dist/runtime-cuda/bin/python3"
+          fi
+          "$PY" smoke_test.py --package dist/runtime-cuda "$PY"
+
+      - name: Archive CUDA (contents at top level, no wrapper dir)
+        if: matrix.target.gpu
+        shell: bash
+        run: tar -czf smartsub-faster-whisper-runtime-${{ matrix.target.artifact_suffix }}-cuda.tar.gz -C dist/runtime-cuda .
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.target.gpu
+        with:
+          name: runtime-${{ matrix.target.artifact_suffix }}-cuda
+          path: smartsub-faster-whisper-runtime-${{ matrix.target.artifact_suffix }}-cuda.tar.gz
+          if-no-files-found: error
+
   publish_latest:
     name: Publish latest Release
     runs-on: ubuntu-latest
@@ -96,7 +125,11 @@ jobs:
           python3 - "$ENGINE_VERSION" "$PROTOCOL_VERSION" "$BUILT_AT" "$GIT_SHA" "$PYTHON_VERSION" <<'PY'
           import json, os, sys, hashlib
           engine_version, protocol_version, built_at, git_sha, python_version = sys.argv[1:6]
-          suffixes = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
+          # CPU 包（默认）+ Full GPU(CUDA12) 包（-cuda 后缀，仅 win/linux）。缺失项自动跳过。
+          suffixes = [
+              "windows-x64", "macos-arm64", "macos-x64", "linux-x64",
+              "windows-x64-cuda", "linux-x64-cuda",
+          ]
 
           def runtime_artifacts():
               out = {}

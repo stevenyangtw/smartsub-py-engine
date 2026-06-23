@@ -37,10 +37,24 @@ faster-whisper 拖出的原生 wheel（ctranslate2 / av / tokenizers / onnxrunti
 资产：
 
 ```
+# CPU 包（默认，全平台）
 smartsub-faster-whisper-runtime-{macos-arm64,macos-x64,windows-x64,linux-x64}.tar.gz
+# Full GPU(CUDA12) 包（仅 windows-x64 / linux-x64；捆绑 NVIDIA cuBLAS/cuDNN，~1.4GB）
+smartsub-faster-whisper-runtime-{windows-x64,linux-x64}-cuda.tar.gz
 checksums.sha256
 manifest.json   # engineVersion / protocolVersion / pythonVersion + runtime.artifacts(per-suffix sha256/size)
 ```
+
+### CPU / GPU 变体
+
+- **CPU 包**（原包名，默认）：仅 `faster-whisper`，体积小，全平台可用。
+- **GPU 包**（`-cuda` 后缀）：在 CPU 基础上**捆绑** `nvidia-cublas-cu12` / `nvidia-cudnn-cu12`(9.x) /
+  `nvidia-cuda-runtime-cu12`，N 卡 + 较新驱动（CUDA 12.3+）开箱即用，无需用户自装 CUDA Toolkit/cuDNN。
+  仅 `windows-x64` / `linux-x64` 有官方 nvidia wheel；macOS 无 GPU，不产 GPU 包。
+- `main.py` 启动时会在首个原生 import 前定位 CUDA 库：优先包内 `site-packages/nvidia/*`，
+  其次系统 CUDA；Windows 用 `os.add_dll_directory`+`PATH`，Linux 用 `LD_LIBRARY_PATH` 后 re-exec 一次。
+  CPU 包无 `nvidia/` 目录时该步为 no-op。
+- App 侧默认拉取 CPU 包；是否下载 GPU 包由主仓库 SmartSub 按显卡/驱动判定与引导（本仓库只负责产出二者）。
 
 ## 本地开发
 
@@ -52,6 +66,9 @@ uv run --python "$(cat .python-version)" -- python smoke_test.py
 
 # 构建单自包含运行时到 dist/runtime/（PBS 解释器 + site-packages + main.py）
 uv run --python "$(cat .python-version)" -- python build_runtime_package.py dist/runtime
+
+# 构建 Full GPU(CUDA12) 变体到 dist/runtime-cuda/（仅 windows-x64 / linux-x64；捆绑 cuBLAS/cuDNN）
+uv run --python "$(cat .python-version)" -- python build_runtime_package.py dist/runtime-cuda --variant cuda
 
 # 包模式冒烟：用运行时内嵌解释器 + PYTHONPATH=site-packages 跑 dist/runtime/main.py
 #   unix:  dist/runtime/bin/python3 smoke_test.py --package dist/runtime dist/runtime/bin/python3
