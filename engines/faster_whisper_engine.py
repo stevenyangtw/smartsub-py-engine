@@ -157,3 +157,58 @@ def transcribe(params, emit_event, is_cancelled):
         "duration": info.duration,
         "segments": segments,
     }
+
+
+def align(params, emit_event, is_cancelled):
+    audio_file = params.get("videoPath") or params.get("audioPath") or params.get("audio_file")
+    txt_file = params.get("txtPath")
+    if not audio_file:
+        raise EngineError("invalid_params", "videoPath or audioPath is required")
+    if not txt_file:
+        raise EngineError("invalid_params", "txtPath is required")
+
+    model_params = params.get("modelParams", {})
+    model = _get_model(
+        model_params.get("model", "base"),
+        model_params.get("device", "auto"),
+        model_params.get("compute_type", "auto"),
+        model_params.get("download_root"),
+    )
+
+    language = model_params.get("language")
+    if language in (None, "", "auto"):
+        language = None
+
+    try:
+        import stable_whisper
+    except ImportError:
+        raise EngineError("engine_not_installed", "stable-ts is not installed")
+
+    emit_event("progress", {"percent": 0})
+    
+    try:
+        result = stable_whisper.align(
+            model,
+            audio_file,
+            txt_file,
+            language=language,
+        )
+    except Exception as e:
+        raise EngineError("align_failed", f"stable_whisper.align failed: {str(e)}")
+
+    if is_cancelled():
+        return None
+
+    # 將結果輸出到與影片同目錄下
+    import os
+    base_name = os.path.splitext(audio_file)[0]
+    output_srt = base_name + ".aligned.srt"
+    
+    result.to_srt_vtt(output_srt, word_level=False)
+    
+    emit_event("progress", {"percent": 100})
+
+    return {
+        "engine": "faster_whisper",
+        "srtPath": output_srt,
+    }

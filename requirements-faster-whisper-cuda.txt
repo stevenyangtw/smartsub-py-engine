@@ -5,3 +5,4 @@ faster-whisper>=1.1.0
 nvidia-cublas-cu12>=12.3
 nvidia-cudnn-cu12>=9.1,<10
 nvidia-cuda-runtime-cu12>=12.3
+stable-ts>=2.17.0

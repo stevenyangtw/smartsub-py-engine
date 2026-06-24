@@ -250,6 +250,41 @@ def handle_transcribe(req_id, params):
     threading.Thread(target=worker, name="transcribe-%s" % req_id, daemon=True).start()
 
 
+def handle_align(req_id, params):
+    """在 worker 线程中执行强制对齐。"""
+    cancel_event = threading.Event()
+    with _cancel_lock:
+        _cancel_events[req_id] = cancel_event
+
+    model_params = params.get("modelParams", {})
+    _warmup_engine_on_main_thread(model_params.get("engine", "faster_whisper"))
+
+    def worker():
+        engine_name = model_params.get("engine", "faster_whisper")
+        try:
+            engine = get_engine(engine_name)
+            if not hasattr(engine, "align"):
+                raise EngineError("not_supported", f"engine {engine_name} does not support align")
+            result = engine.align(
+                params,
+                emit_event=lambda method, p: emit_event(method, dict(p, id=req_id)),
+                is_cancelled=cancel_event.is_set,
+            )
+            if cancel_event.is_set():
+                emit_error(req_id, "cancelled", "alignment cancelled by client")
+            else:
+                emit_result(req_id, result)
+        except Exception as exc:  # noqa: BLE001
+            code = getattr(exc, "engine_error_code", "internal_error")
+            log.error("align failed: %s\n%s", exc, traceback.format_exc())
+            emit_error(req_id, code, str(exc))
+        finally:
+            with _cancel_lock:
+                _cancel_events.pop(req_id, None)
+
+    threading.Thread(target=worker, name="align-%s" % req_id, daemon=True).start()
+
+
 def handle_cancel(params):
     target_id = params.get("id")
     with _cancel_lock:
@@ -263,6 +298,7 @@ HANDLERS = {
     "ping": handle_ping,
     "preload": handle_preload,
     "transcribe": handle_transcribe,
+    "align": handle_align,
 }
 
 
