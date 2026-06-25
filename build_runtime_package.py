@@ -28,6 +28,7 @@ onnxruntime）；uv 安装正确的逐平台 wheel，其原生依赖由上游 de
                 仅 windows-x64 / linux-x64 有官方 nvidia wheel；macOS 无 GPU，请勿用本变体。
 """
 import argparse
+import os
 import shutil
 import subprocess
 import sys
