@@ -165,7 +165,7 @@ def main() -> None:
     
     env = os.environ.copy()
     # Add site-packages to PYTHONPATH so the --no-build-isolation PEP 517 backend can find setuptools
-    env["PYTHONPATH"] = str(site)
+    env["PYTHONPATH"] = str(site.resolve())
 
     install_cmd = [
         "uv", "pip", "install",
