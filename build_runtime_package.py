@@ -154,9 +154,18 @@ def main() -> None:
     if not req.is_file():
         sys.exit(f"missing {req}")
     print(f"variant={variant} requirements={req.name}")
+    # workaround for stable-ts and openai-whisper which lack wheels
+    run(
+        "uv", "pip", "install",
+        "--python", str(out_python(out)),
+        "--target", str(site),
+        "setuptools",
+    )
     run(
         "uv", "pip", "install",
         "--only-binary=:all:",
+        "--no-binary=stable-ts,openai-whisper",
+        "--no-build-isolation",
         "--python", str(out_python(out)),
         "--target", str(site),
         "-r", str(req),
