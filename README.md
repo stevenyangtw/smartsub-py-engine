@@ -32,7 +32,7 @@ faster-whisper 拖出的原生 wheel（ctranslate2 / av / tokenizers / onnxrunti
 每次推送到 `main` 或手动触发 workflow 后，CI 以 `(os,arch)` 矩阵（4 平台）在各自原生 runner
 （host == target）构建并发布到：
 
-**https://github.com/buxuku/smartsub-py-engine/releases/tag/latest**
+**https://github.com/stevenyangtw/smartsub-py-engine/releases/tag/latest**
 
 资产：
 
