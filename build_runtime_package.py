@@ -161,7 +161,12 @@ def main() -> None:
         "--target", str(site),
         "setuptools",
     )
-    run(
+    
+    env = os.environ.copy()
+    # Add site-packages to PYTHONPATH so the --no-build-isolation PEP 517 backend can find setuptools
+    env["PYTHONPATH"] = str(site)
+
+    install_cmd = [
         "uv", "pip", "install",
         "--only-binary=:all:",
         "--no-binary=stable-ts,openai-whisper",
@@ -169,7 +174,12 @@ def main() -> None:
         "--python", str(out_python(out)),
         "--target", str(site),
         "-r", str(req),
-    )
+    ]
+    
+    if variant != "cuda":
+        install_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cpu"])
+        
+    run(*install_cmd, env=env)
 
     # 3) sidecar 源码（所有引擎共用同一份 main.py / engines）
     shutil.copy2(ROOT / "main.py", out / "main.py")
