@@ -177,9 +177,21 @@ def main() -> None:
         "-r", str(req),
     ]
     
-    if variant != "cuda":
-        install_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cpu"])
-        
+    # Always pull PyTorch from CPU index (even for CUDA variant) to save space (<2GB limit).
+    # faster-whisper uses CTranslate2 (which has its own CUDA libs) for GPU inference,
+    # and stable-ts only needs PyTorch for CPU tensor ops during alignment.
+    # We pre-install them explicitly to prevent uv from choosing the massive PyPI versions.
+    # Note: PyTorch's CPU index doesn't provide macOS wheels, but macOS PyPI wheels are already small.
+    if sys.platform != "darwin":
+        run(
+            "uv", "pip", "install",
+            "--python", str(out_python(out)),
+            "--target", str(site),
+            "--index-url", "https://download.pytorch.org/whl/cpu",
+            "torch", "torchaudio",
+        )
+
+    install_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cpu"])
     run(*install_cmd, env=env)
 
     # 3) sidecar 源码（所有引擎共用同一份 main.py / engines）
